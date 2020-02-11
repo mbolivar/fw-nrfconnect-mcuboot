@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include <stdbool.h>
+
 #include <assert.h>
 #include <zephyr.h>
 #include <drivers/gpio.h>
@@ -65,6 +67,65 @@ static inline bool boot_skip_serial_recovery()
 #endif
 
 MCUBOOT_LOG_MODULE_REGISTER(mcuboot);
+
+#ifdef CONFIG_DEVICE_POWER_MANAGEMENT
+static struct device *log_device;
+static volatile bool log_device_off;
+
+static void device_off_cb(struct device *dev, int status, void *context,
+                          void *arg)
+{
+    *(volatile bool*)arg = true;
+}
+
+/*
+ * Manually store pointers to devices used by the bootloader, so they
+ * can be put back into their reset states before jumping to the
+ * chain-loaded image.
+ */
+static void save_used_devices(void)
+{
+#if defined(CONFIG_LOG_BACKEND_UART)
+    log_device = device_get_binding(CONFIG_UART_CONSOLE_ON_DEV_NAME);
+#else
+    /* TODO other log backends should save the underlying device here. */
+#endif
+
+    /*
+     * TODO save other devices:
+     * - USB
+     * - serial recovery UART
+     */
+}
+
+/*
+ * Put any devices saved in save_used_devices() back to their reset
+ * states.
+ */
+static void turn_off_used_devices(void)
+{
+    /*
+     * Reset the logging device, and wait for completion. Ignore
+     * errors; this is best-effort based on the abilities of the
+     * driver.
+     */
+    if (log_device) {
+        (void)device_set_power_state(log_device, DEVICE_PM_OFF_STATE,
+                                     device_off_cb, (void*)&log_device_off);
+    }
+    while (!log_device_off)
+        ;
+}
+
+#else
+static inline void save_used_devices(void)
+{
+}
+
+static inline void turn_off_used_devices(void)
+{
+}
+#endif
 
 void os_heap_init(void);
 
@@ -229,6 +290,7 @@ void main(void)
     BOOT_LOG_INF("USB DFU wait time elapsed");
 #endif
 
+    save_used_devices();
     rc = boot_go(&rsp);
     if (rc != 0) {
         BOOT_LOG_ERR("Unable to find bootable image");
@@ -240,6 +302,7 @@ void main(void)
                  rsp.br_image_off);
 
     BOOT_LOG_INF("Jumping to the first image slot");
+    turn_off_used_devices();
     do_boot(&rsp);
 
     BOOT_LOG_ERR("Never should get here");
